@@ -881,6 +881,111 @@ new Chart(ctx, {{
     print(f"\n  [HTML] 已保存至 {path}  →  用浏览器打开即可查看")
 
 
+def save_md(flights: List[Flight], path: str = "arrivals_mxp.md"):
+    """生成 Markdown 报告，适合 GitHub / VS Code / Obsidian 查看"""
+    from collections import defaultdict, Counter
+
+    today      = datetime.date.today().strftime("%Y-%m-%d")
+    total_pax  = sum(f.pax for f in flights)
+    avg_pax    = total_pax // len(flights)
+
+    hourly: Dict[int, int] = defaultdict(int)
+    for f in flights:
+        hourly[f.arr_hour] += f.pax
+
+    peak_hour = max(hourly, key=hourly.get)
+    low_hour  = min(hourly, key=hourly.get)
+    ratio     = hourly[peak_hour] / max(hourly[low_hour], 1)
+    top3      = Counter(f.origin for f in flights).most_common(3)
+
+    slots: Dict[int, List[Flight]] = defaultdict(list)
+    for f in flights:
+        slots[(f.arr_hour * 60 + f.arr_min) // 30].append(f)
+
+    def pressure_md(pax_hr: float) -> str:
+        if pax_hr >= 500: return "🔴 极高峰"
+        if pax_hr >= 350: return "🟡 高  峰"
+        if pax_hr >= 180: return "🟢 正  常"
+        return                    "🔵 低  峰"
+
+    def bar_md(val: int, max_val: int, width: int = 20) -> str:
+        filled = round(val / max_val * width) if max_val else 0
+        return "█" * filled + "░" * (width - filled)
+
+    max_pax = max(hourly.values()) if hourly else 1
+
+    # ── 汇总部分 ──
+    lines = [
+        f"# MXP 米兰马尔彭萨机场 到达航班报告",
+        f"",
+        f"> **日期：** {today} &nbsp;|&nbsp; "
+        f"**航班总数：** {len(flights)} &nbsp;|&nbsp; "
+        f"**预计旅客：** {total_pax:,} 人 &nbsp;|&nbsp; "
+        f"**均旅客/班：** {avg_pax} 人",
+        f"",
+        f"---",
+        f"",
+        f"## 关键指标",
+        f"",
+        f"| 指标 | 数值 |",
+        f"|------|------|",
+        f"| 最高峰小时 | `{peak_hour:02d}:00` — {hourly[peak_hour]:,} 人 |",
+        f"| 最低谷小时 | `{low_hour:02d}:00` — {hourly[low_hour]:,} 人 |",
+        f"| 峰谷比 | **{ratio:.1f}×** |",
+        f"| 主要出发地 | {' / '.join(f'`{o}` {n}班' for o, n in top3)} |",
+        f"",
+        f"---",
+        f"",
+        f"## 每小时旅客流量",
+        f"",
+        f"| 小时 | 旅客量 | 流量图 | 压力 |",
+        f"|:----:|-------:|--------|------|",
+    ]
+
+    for h in range(min(hourly), max(hourly) + 1):
+        pax = hourly.get(h, 0)
+        lines.append(
+            f"| `{h:02d}:xx` | {pax:,} | `{bar_md(pax, max_pax)}` | {pressure_md(pax)} |"
+        )
+
+    lines += ["", "---", "", "## 分时段航班明细", ""]
+
+    for key in sorted(slots.keys()):
+        slot_flights = slots[key]
+        sm = key * 30
+        sh, smin = divmod(sm, 60)
+        eh, emin = divmod(sm + 30, 60)
+        slot_pax = sum(f.pax for f in slot_flights)
+        pax_hr   = slot_pax * 2
+        badge    = pressure_md(pax_hr)
+
+        lines += [
+            f"### {sh:02d}:{smin:02d} – {eh:02d}:{emin:02d} &nbsp; {badge}",
+            f"",
+            f"> {pax_hr:,.0f} 人/h &nbsp;|&nbsp; {len(slot_flights)} 班次 &nbsp;|&nbsp; 合计 {slot_pax:,} 人",
+            f"",
+            f"| 航班号 | 到达时刻 | 出发地 | 旅客数 | 状态 |",
+            f"|--------|----------|--------|-------:|------|",
+        ]
+        for f in sorted(slot_flights, key=lambda x: x.arr_min):
+            status = f.status if f.status else "—"
+            lines.append(
+                f"| `{f.callsign}` | {f.arr_hour:02d}:{f.arr_min:02d} "
+                f"| {f.origin} | {f.pax:,} | {status} |"
+            )
+        lines.append("")
+
+    lines += [
+        "---",
+        "",
+        f"*MXP 机场海关错峰优化项目 · 生成时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}*",
+    ]
+
+    with open(path, "w", encoding="utf-8") as fp:
+        fp.write("\n".join(lines))
+    print(f"\n  [MD]   已保存至 {path}  →  可在 GitHub / VS Code / Obsidian 查看")
+
+
 def save_csv(flights: List[Flight], path: str = OUTPUT_CSV):
     with open(path, "w", newline="", encoding="utf-8") as fp:
         writer = csv.writer(fp)
@@ -936,6 +1041,10 @@ def main():
         "--html", action="store_true",
         help="生成 HTML 报告（arrivals_mxp.html），可在浏览器打开"
     )
+    parser.add_argument(
+        "--md", action="store_true",
+        help="生成 Markdown 报告（arrivals_mxp.md），适合 GitHub/VS Code/Obsidian"
+    )
     args = parser.parse_args()
 
     # Demo 模式
@@ -944,6 +1053,8 @@ def main():
         print_flights(flights)
         if args.html:
             save_html(flights)
+        if args.md:
+            save_md(flights)
         if not args.no_csv:
             save_csv(flights)
         if args.planner:
@@ -989,6 +1100,8 @@ def main():
 
     if args.html:
         save_html(flights)
+    if args.md:
+        save_md(flights)
 
     if not args.no_csv:
         save_csv(flights)
