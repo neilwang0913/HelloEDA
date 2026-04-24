@@ -373,39 +373,241 @@ def fetch_mxp_selenium() -> List[Flight]:
 
 
 # ─────────────────────────────────────────
+# Demo 数据（MXP 典型日航班结构，基于公开时刻表构建）
+# ─────────────────────────────────────────
+
+DEMO_FLIGHTS = [
+    # 早班波 06:00-08:00
+    ("FR1234",  "BCN",  6, 10, 189, "landed"),
+    ("U24456",  "LGW",  6, 35, 156, "landed"),
+    ("LH5678",  "FRA",  6, 50, 167, "landed"),
+    ("AZ1102",  "FCO",  7,  5, 143, "landed"),
+    ("TK1845",  "IST",  7, 20, 231, "landed"),
+    ("FR2210",  "MAD",  7, 30, 189, "landed"),
+    ("U23344",  "BRS",  7, 40, 156, "landed"),
+    ("EK0206",  "DXB",  7, 55, 358, "landed"),
+    # 高峰波 08:00-10:00
+    ("LH1234",  "MUC",  8,  0, 167, "landed"),
+    ("AF1300",  "CDG",  8, 15, 202, "landed"),
+    ("BA0564",  "LHR",  8, 20, 178, "landed"),
+    ("FR5566",  "STN",  8, 35, 189, "landed"),
+    ("QR0126",  "DOH",  8, 40, 269, "landed"),
+    ("U27890",  "AMS",  8, 55, 156, "landed"),
+    ("IB3456",  "MAD",  9,  0, 174, "landed"),
+    ("KL1632",  "AMS",  9, 10, 202, "landed"),
+    ("LX0948",  "ZRH",  9, 20, 143, "landed"),
+    ("FR3344",  "DUB",  9, 30, 189, "landed"),
+    ("OS0512",  "VIE",  9, 45, 167, "landed"),
+    ("U25566",  "GVA",  9, 55, 156, "landed"),
+    # 午间低谷 10:00-13:00
+    ("AZ0876",  "CAT", 10, 10, 143, "landed"),
+    ("FR7788",  "RYG", 10, 40, 189, "landed"),
+    ("TK0382",  "IST", 11, 15, 231, "landed"),
+    ("EK0204",  "DXB", 11, 50, 358, "landed"),
+    ("QR0124",  "DOH", 12, 20, 269, "landed"),
+    ("LH0992",  "FRA", 12, 50, 167, "landed"),
+    # 下午波 13:00-17:00
+    ("AF1302",  "CDG", 13, 10, 202, "landed"),
+    ("BA0562",  "LHR", 13, 30, 178, "landed"),
+    ("FR9900",  "CRL", 13, 50, 189, "landed"),
+    ("U29988",  "LTN", 14, 10, 156, "landed"),
+    ("KL1634",  "AMS", 14, 30, 202, "landed"),
+    ("LX0946",  "ZRH", 14, 55, 143, "landed"),
+    ("IB3458",  "BCN", 15, 20, 174, "landed"),
+    ("OS0514",  "VIE", 15, 40, 167, "landed"),
+    ("FR2288",  "AGP", 16,  5, 189, "landed"),
+    ("U23322",  "EDI", 16, 30, 156, "landed"),
+    # 晚高峰 17:00-21:00
+    ("LH1236",  "MUC", 17,  0, 167, "landed"),
+    ("TK1847",  "IST", 17, 20, 231, "landed"),
+    ("EK0208",  "DXB", 17, 40, 358, "landed"),
+    ("AF1304",  "CDG", 18,  5, 202, "landed"),
+    ("BA0566",  "LHR", 18, 20, 178, "landed"),
+    ("FR4422",  "VLC", 18, 35, 189, "landed"),
+    ("QR0128",  "DOH", 18, 50, 269, "landed"),
+    ("U21100",  "FCO", 19,  5, 156, "landed"),
+    ("KL1636",  "AMS", 19, 25, 202, "landed"),
+    ("LX0950",  "ZRH", 19, 50, 143, "landed"),
+    ("AZ0880",  "NAP", 20, 10, 143, "landed"),
+    ("FR6644",  "ATH", 20, 35, 189, "landed"),
+    # 夜班 21:00-23:00
+    ("LH0994",  "FRA", 21, 10, 167, "landed"),
+    ("TK1849",  "IST", 21, 40, 231, "landed"),
+    ("EK0202",  "DXB", 22, 15, 358, "landed"),
+    ("FR8810",  "PMI", 22, 50, 189, "landed"),
+]
+
+
+def get_demo_flights() -> List[Flight]:
+    return [Flight(c, o, h, m, p, s) for c, o, h, m, p, s in DEMO_FLIGHTS]
+
+
+# ─────────────────────────────────────────
+# ANSI 颜色工具
+# ─────────────────────────────────────────
+
+class C:
+    RED    = "\033[91m"
+    YELLOW = "\033[93m"
+    GREEN  = "\033[92m"
+    CYAN   = "\033[96m"
+    BOLD   = "\033[1m"
+    DIM    = "\033[2m"
+    RESET  = "\033[0m"
+
+def colorize(text: str, *codes: str) -> str:
+    return "".join(codes) + text + C.RESET
+
+
+# ─────────────────────────────────────────
 # 输出：终端打印 + CSV
 # ─────────────────────────────────────────
 
+SLOT_SIZE = 30   # 分钟，时段粒度
+
+def _slot_key(f: Flight) -> int:
+    return (f.arr_hour * 60 + f.arr_min) // SLOT_SIZE
+
+def _pressure(pax_per_hr: float) -> tuple:
+    """返回 (标签, 颜色, 进度条)"""
+    bar_total = 10
+    if pax_per_hr >= 500:
+        filled = 10
+        return "极高峰", C.RED,    "█" * filled
+    elif pax_per_hr >= 350:
+        filled = 8
+        return "高  峰", C.YELLOW, "█" * filled + "░" * (bar_total - filled)
+    elif pax_per_hr >= 180:
+        filled = 5
+        return "正  常", C.GREEN,  "█" * filled + "░" * (bar_total - filled)
+    else:
+        filled = 2
+        return "低  峰", C.CYAN,   "█" * filled + "░" * (bar_total - filled)
+
+
 def print_flights(flights: List[Flight]):
-    print("\n" + "=" * 60)
-    print(f"  MXP 到达航班列表（共 {len(flights)} 条）")
-    print("=" * 60)
-    print(f"{'航班号':<12} {'出发地':<8} {'到达时刻':<10} {'旅客数':<8} {'状态'}")
-    print("-" * 60)
+    today = datetime.date.today().strftime("%Y-%m-%d")
+    total_pax = sum(f.pax for f in flights)
+
+    # ── 标题 ──
+    print()
+    print(colorize("╔══════════════════════════════════════════════════════════════╗", C.BOLD))
+    print(colorize(f"║   MXP 米兰马尔彭萨机场  到达航班报告  {today}          ║", C.BOLD))
+    print(colorize(f"║   共 {len(flights)} 个航班  |  预计旅客总量：{total_pax:,} 人              ║", C.BOLD))
+    print(colorize("╚══════════════════════════════════════════════════════════════╝", C.BOLD))
+
+    # ── 按时段分组 ──
+    from collections import defaultdict
+    slots: Dict[int, List[Flight]] = defaultdict(list)
     for f in flights:
-        print(f"{f.callsign:<12} {f.origin:<8} "
-              f"{f.arr_hour:02d}:{f.arr_min:02d}     "
-              f"{f.pax:<8} {f.status}")
-    print("=" * 60)
+        slots[_slot_key(f)].append(f)
+
+    print()
+    for slot_key in sorted(slots.keys()):
+        slot_flights = slots[slot_key]
+        slot_min_abs = slot_key * SLOT_SIZE
+        sh, sm = divmod(slot_min_abs, 60)
+        eh, em = divmod(slot_min_abs + SLOT_SIZE, 60)
+        slot_label = f"{sh:02d}:{sm:02d}－{eh:02d}:{em:02d}"
+
+        # 计算该时段到达率（人/小时）
+        pax_in_slot = sum(f.pax for f in slot_flights)
+        pax_per_hr  = pax_in_slot * (60 / SLOT_SIZE)
+        label, color, bar = _pressure(pax_per_hr)
+
+        # 时段标题行
+        print(colorize(
+            f"  ┌─ {slot_label}  {label}  [{bar}]  "
+            f"{pax_per_hr:>5.0f}人/h  ({len(slot_flights)}班次)",
+            C.BOLD, color
+        ))
+
+        # 航班明细
+        for f in sorted(slot_flights, key=lambda x: x.arr_min):
+            status_color = C.GREEN if f.status == "landed" else C.YELLOW
+            status_str   = colorize(f.status or "-", status_color)
+            print(
+                f"  │  {colorize(f.callsign, C.BOLD):<18}"
+                f"{f.arr_hour:02d}:{f.arr_min:02d}   "
+                f"出发: {f.origin:<6}"
+                f"PAX: {f.pax:<6}"
+                f"{status_str}"
+            )
+        print("  └" + "─" * 60)
+
+    # ── 汇总统计 ──
+    print()
+    print(colorize("  ── 全天旅客流量概览 ──", C.BOLD))
+    print()
+    _print_hourly_bar(flights)
+    print()
+    _print_summary(flights)
+
+
+def _print_hourly_bar(flights: List[Flight]):
+    """按小时绘制 ASCII 旅客量柱状图"""
+    from collections import defaultdict
+    hourly: Dict[int, int] = defaultdict(int)
+    for f in flights:
+        hourly[f.arr_hour] += f.pax
+
+    if not hourly:
+        return
+
+    max_pax = max(hourly.values()) or 1
+    bar_width = 30
+
+    print(f"  {'小时':>4}  {'旅客量':>6}  柱状图")
+    print(f"  {'─'*4}  {'─'*6}  {'─'*bar_width}")
+
+    for h in range(min(hourly), max(hourly) + 1):
+        pax = hourly.get(h, 0)
+        filled = int(pax / max_pax * bar_width)
+        _, color, _ = _pressure(pax)
+        bar = colorize("▓" * filled, color) + "░" * (bar_width - filled)
+        print(f"  {h:02d}:xx  {pax:>6,}  {bar}  {pax:,}")
+
+
+def _print_summary(flights: List[Flight]):
+    """打印关键统计数据"""
+    from collections import defaultdict, Counter
+    if not flights:
+        return
+
+    hourly: Dict[int, int] = defaultdict(int)
+    for f in flights:
+        hourly[f.arr_hour] += f.pax
+
+    peak_hour = max(hourly, key=hourly.get)
+    low_hour  = min(hourly, key=hourly.get)
+    top_origins = Counter(f.origin for f in flights).most_common(3)
+
+    print(colorize("  ── 关键指标 ──", C.BOLD))
+    print(f"  最高峰小时  : {peak_hour:02d}:00  ({hourly[peak_hour]:,} 人)")
+    print(f"  最低谷小时  : {low_hour:02d}:00  ({hourly[low_hour]:,} 人)")
+    print(f"  峰谷比      : {hourly[peak_hour]/hourly[low_hour]:.1f}x")
+    print(f"  主要出发地  : " + "  ".join(f"{o}({n}班)" for o, n in top_origins))
+    print(f"  平均旅客/班 : {sum(f.pax for f in flights)//len(flights)} 人")
 
 
 def save_csv(flights: List[Flight], path: str = OUTPUT_CSV):
     with open(path, "w", newline="", encoding="utf-8") as fp:
         writer = csv.writer(fp)
-        writer.writerow(["callsign", "origin", "arr_hour", "arr_min", "pax"])
+        writer.writerow(["callsign", "origin", "arr_hour", "arr_min", "pax", "status"])
         for f in flights:
             writer.writerow([f.callsign, f.origin,
-                             f.arr_hour, f.arr_min, f.pax])
-    print(f"\n[输出] 已保存至 {path}")
+                             f.arr_hour, f.arr_min, f.pax, f.status])
+    print(f"\n  [CSV] 已保存至 {path}")
 
 
 def print_planner_format(flights: List[Flight]):
     """打印可直接粘贴到 peak_window_planner.py 的 FLIGHT_SCHEDULE 格式"""
-    print("\n# 粘贴以下内容替换 peak_window_planner.py 中的 FLIGHT_SCHEDULE：")
-    print("FLIGHT_SCHEDULE = [")
+    print()
+    print(colorize("  ── peak_window_planner.py 兼容格式 ──", C.BOLD))
+    print("  FLIGHT_SCHEDULE = [")
     for f in flights:
-        print(f'    ("{f.callsign}", {f.arr_hour}, {f.arr_min}, {f.pax}),')
-    print("]")
+        print(f'      ("{f.callsign}", {f.arr_hour}, {f.arr_min}, {f.pax}),')
+    print("  ]")
 
 
 # ─────────────────────────────────────────
@@ -435,7 +637,21 @@ def main():
         "--no-csv", action="store_true",
         help="不保存 CSV 文件"
     )
+    parser.add_argument(
+        "--demo", action="store_true",
+        help="使用内置 MXP 示例数据（无需网络/账号，用于演示呈现效果）"
+    )
     args = parser.parse_args()
+
+    # Demo 模式
+    if args.demo:
+        flights = get_demo_flights()
+        print_flights(flights)
+        if not args.no_csv:
+            save_csv(flights)
+        if args.planner:
+            print_planner_format(flights)
+        return
 
     # 解析日期
     query_date = None
