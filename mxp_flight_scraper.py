@@ -590,6 +590,297 @@ def _print_summary(flights: List[Flight]):
     print(f"  平均旅客/班 : {sum(f.pax for f in flights)//len(flights)} 人")
 
 
+def save_html(flights: List[Flight], path: str = "arrivals_mxp.html"):
+    """生成自包含 HTML 报告，含 Chart.js 图表，可直接浏览器打开"""
+    from collections import defaultdict, Counter
+
+    today = datetime.date.today().strftime("%Y-%m-%d")
+    total_pax = sum(f.pax for f in flights)
+
+    # 按小时聚合
+    hourly: Dict[int, int] = defaultdict(int)
+    for f in flights:
+        hourly[f.arr_hour] += f.pax
+    hours     = list(range(min(hourly), max(hourly) + 1))
+    pax_vals  = [hourly.get(h, 0) for h in hours]
+    bar_colors = [
+        "#ef4444" if v >= 500 else
+        "#f59e0b" if v >= 350 else
+        "#22c55e" if v >= 180 else
+        "#06b6d4"
+        for v in pax_vals
+    ]
+
+    # 峰值统计
+    peak_hour  = max(hourly, key=hourly.get)
+    low_hour   = min(hourly, key=hourly.get)
+    ratio      = hourly[peak_hour] / max(hourly[low_hour], 1)
+    top3       = Counter(f.origin for f in flights).most_common(3)
+    avg_pax    = total_pax // len(flights)
+
+    # 按时段分组（30 min）
+    slots: Dict[int, List[Flight]] = defaultdict(list)
+    for f in flights:
+        key = (f.arr_hour * 60 + f.arr_min) // 30
+        slots[key].append(f)
+
+    def slot_html(key: int, flist: List[Flight]) -> str:
+        sm = key * 30
+        sh, smin = divmod(sm, 60)
+        eh, emin = divmod(sm + 30, 60)
+        slot_pax = sum(f.pax for f in flist)
+        pax_hr   = slot_pax * 2
+        if pax_hr >= 500:
+            cls, label = "extreme", "极高峰"
+        elif pax_hr >= 350:
+            cls, label = "high",    "高 峰"
+        elif pax_hr >= 180:
+            cls, label = "normal",  "正 常"
+        else:
+            cls, label = "low",     "低 峰"
+
+        rows = ""
+        for f in sorted(flist, key=lambda x: x.arr_min):
+            s_cls = "status-landed" if f.status == "landed" else "status-other"
+            rows += f"""
+            <tr>
+              <td class="fn">{f.callsign}</td>
+              <td>{f.arr_hour:02d}:{f.arr_min:02d}</td>
+              <td>{f.origin}</td>
+              <td>{f.pax:,}</td>
+              <td><span class="{s_cls}">{f.status or '—'}</span></td>
+            </tr>"""
+
+        return f"""
+        <div class="slot {cls}">
+          <div class="slot-header">
+            <span class="slot-time">{sh:02d}:{smin:02d} – {eh:02d}:{emin:02d}</span>
+            <span class="slot-badge">{label}</span>
+            <span class="slot-meta">{pax_hr:,.0f} 人/h &nbsp;|&nbsp; {len(flist)} 班次</span>
+          </div>
+          <table class="flight-table">
+            <thead><tr>
+              <th>航班号</th><th>到达时刻</th><th>出发地</th><th>旅客数</th><th>状态</th>
+            </tr></thead>
+            <tbody>{rows}</tbody>
+          </table>
+        </div>"""
+
+    slots_html = "\n".join(
+        slot_html(k, slots[k]) for k in sorted(slots.keys())
+    )
+    top3_html = "  ".join(f"<b>{o}</b> {n}班" for o, n in top3)
+
+    html = f"""<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MXP 航班到达报告 {today}</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: "Segoe UI", system-ui, sans-serif; background: #0f172a; color: #e2e8f0; }}
+
+  /* ── 顶部标题 ── */
+  .header {{
+    background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%);
+    border-bottom: 1px solid #334155;
+    padding: 28px 40px;
+    display: flex; align-items: center; gap: 24px;
+  }}
+  .airport-code {{ font-size: 56px; font-weight: 900; color: #38bdf8; letter-spacing: -2px; }}
+  .header-info h1 {{ font-size: 20px; font-weight: 600; color: #94a3b8; }}
+  .header-info h2 {{ font-size: 14px; color: #64748b; margin-top: 4px; }}
+  .header-pills {{ margin-left: auto; display: flex; gap: 16px; }}
+  .pill {{
+    background: #1e293b; border: 1px solid #334155; border-radius: 12px;
+    padding: 10px 20px; text-align: center;
+  }}
+  .pill .val {{ font-size: 24px; font-weight: 700; color: #f1f5f9; }}
+  .pill .lbl {{ font-size: 11px; color: #64748b; margin-top: 2px; }}
+
+  /* ── 布局 ── */
+  .container {{ max-width: 1280px; margin: 0 auto; padding: 32px 24px; }}
+
+  /* ── 统计卡片 ── */
+  .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 32px; }}
+  .card {{
+    background: #1e293b; border: 1px solid #334155; border-radius: 12px;
+    padding: 20px 24px;
+  }}
+  .card .c-label {{ font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: .05em; }}
+  .card .c-value {{ font-size: 28px; font-weight: 700; color: #f1f5f9; margin: 6px 0 2px; }}
+  .card .c-sub   {{ font-size: 13px; color: #94a3b8; }}
+
+  /* ── 图表区 ── */
+  .chart-box {{
+    background: #1e293b; border: 1px solid #334155; border-radius: 12px;
+    padding: 24px; margin-bottom: 32px;
+  }}
+  .chart-box h3 {{ font-size: 15px; color: #94a3b8; margin-bottom: 16px; }}
+  .chart-box canvas {{ max-height: 260px; }}
+
+  /* ── 图例 ── */
+  .legend {{ display: flex; gap: 20px; margin-bottom: 20px; flex-wrap: wrap; }}
+  .legend-item {{ display: flex; align-items: center; gap: 8px; font-size: 13px; color: #94a3b8; }}
+  .dot {{ width: 12px; height: 12px; border-radius: 3px; }}
+  .dot.extreme {{ background: #ef4444; }}
+  .dot.high    {{ background: #f59e0b; }}
+  .dot.normal  {{ background: #22c55e; }}
+  .dot.low     {{ background: #06b6d4; }}
+
+  /* ── 时段块 ── */
+  .slot {{ border-radius: 10px; margin-bottom: 12px; overflow: hidden; border: 1px solid #334155; }}
+  .slot-header {{
+    display: flex; align-items: center; gap: 16px;
+    padding: 12px 20px; font-size: 14px; cursor: pointer;
+  }}
+  .slot.extreme .slot-header {{ background: rgba(239,68,68,.18); border-left: 4px solid #ef4444; }}
+  .slot.high    .slot-header {{ background: rgba(245,158,11,.15); border-left: 4px solid #f59e0b; }}
+  .slot.normal  .slot-header {{ background: rgba(34,197,94,.12);  border-left: 4px solid #22c55e; }}
+  .slot.low     .slot-header {{ background: rgba(6,182,212,.10);  border-left: 4px solid #06b6d4; }}
+  .slot-time  {{ font-weight: 700; color: #f1f5f9; font-size: 15px; min-width: 130px; }}
+  .slot-badge {{
+    font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 20px;
+  }}
+  .slot.extreme .slot-badge {{ background: #7f1d1d; color: #fca5a5; }}
+  .slot.high    .slot-badge {{ background: #78350f; color: #fcd34d; }}
+  .slot.normal  .slot-badge {{ background: #14532d; color: #86efac; }}
+  .slot.low     .slot-badge {{ background: #164e63; color: #67e8f9; }}
+  .slot-meta {{ color: #64748b; font-size: 13px; margin-left: auto; }}
+
+  /* ── 航班表格 ── */
+  .flight-table {{ width: 100%; border-collapse: collapse; background: #0f172a; }}
+  .flight-table th {{
+    font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+    color: #64748b; padding: 10px 20px; text-align: left;
+    border-bottom: 1px solid #1e293b;
+  }}
+  .flight-table td {{ padding: 10px 20px; font-size: 13px; border-bottom: 1px solid #1e293b; }}
+  .flight-table tr:last-child td {{ border-bottom: none; }}
+  .flight-table tr:hover td {{ background: #1e293b; }}
+  .fn {{ font-weight: 700; color: #38bdf8; font-family: monospace; font-size: 14px; }}
+  .status-landed {{ background: #14532d; color: #86efac; padding: 2px 8px; border-radius: 4px; font-size: 12px; }}
+  .status-other  {{ background: #1e293b; color: #94a3b8; padding: 2px 8px; border-radius: 4px; font-size: 12px; }}
+
+  /* ── 页脚 ── */
+  .footer {{ text-align: center; color: #334155; font-size: 12px; padding: 32px 0; }}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="airport-code">MXP</div>
+  <div class="header-info">
+    <h1>米兰马尔彭萨国际机场</h1>
+    <h2>Milan Malpensa Airport &nbsp;·&nbsp; ICAO: LIMC &nbsp;·&nbsp; {today} 到达报告</h2>
+  </div>
+  <div class="header-pills">
+    <div class="pill">
+      <div class="val">{len(flights)}</div>
+      <div class="lbl">到达航班</div>
+    </div>
+    <div class="pill">
+      <div class="val">{total_pax:,}</div>
+      <div class="lbl">预计旅客</div>
+    </div>
+    <div class="pill">
+      <div class="val">{avg_pax}</div>
+      <div class="lbl">均旅客/班</div>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- 统计卡片 -->
+  <div class="cards">
+    <div class="card">
+      <div class="c-label">最高峰小时</div>
+      <div class="c-value">{peak_hour:02d}:00</div>
+      <div class="c-sub">{hourly[peak_hour]:,} 人到达</div>
+    </div>
+    <div class="card">
+      <div class="c-label">最低谷小时</div>
+      <div class="c-value">{low_hour:02d}:00</div>
+      <div class="c-sub">{hourly[low_hour]:,} 人到达</div>
+    </div>
+    <div class="card">
+      <div class="c-label">峰谷比</div>
+      <div class="c-value">{ratio:.1f}×</div>
+      <div class="c-sub">错峰潜力指标</div>
+    </div>
+    <div class="card">
+      <div class="c-label">主要出发地</div>
+      <div class="c-value" style="font-size:18px">{top3[0][0] if top3 else "—"}</div>
+      <div class="c-sub">{top3_html}</div>
+    </div>
+  </div>
+
+  <!-- 旅客流量图表 -->
+  <div class="chart-box">
+    <h3>每小时到达旅客量</h3>
+    <canvas id="paxChart"></canvas>
+  </div>
+
+  <!-- 图例 -->
+  <div class="legend">
+    <div class="legend-item"><div class="dot extreme"></div>极高峰 ≥500人/h</div>
+    <div class="legend-item"><div class="dot high"></div>高峰 350~499人/h</div>
+    <div class="legend-item"><div class="dot normal"></div>正常 180~349人/h</div>
+    <div class="legend-item"><div class="dot low"></div>低峰 &lt;180人/h</div>
+  </div>
+
+  <!-- 时段航班列表 -->
+  {slots_html}
+
+</div>
+
+<div class="footer">
+  MXP 机场海关错峰优化项目 &nbsp;·&nbsp; 数据仅供研究分析使用
+</div>
+
+<script>
+const ctx = document.getElementById('paxChart');
+new Chart(ctx, {{
+  type: 'bar',
+  data: {{
+    labels: {[f'{h:02d}:00' for h in hours]},
+    datasets: [{{
+      label: '旅客人数',
+      data: {pax_vals},
+      backgroundColor: {bar_colors},
+      borderRadius: 6,
+      borderSkipped: false,
+    }}]
+  }},
+  options: {{
+    responsive: true,
+    plugins: {{
+      legend: {{ display: false }},
+      tooltip: {{
+        callbacks: {{
+          label: ctx => ` ${{ctx.parsed.y.toLocaleString()}} 人`
+        }}
+      }}
+    }},
+    scales: {{
+      x: {{ grid: {{ color: '#1e293b' }}, ticks: {{ color: '#64748b' }} }},
+      y: {{ grid: {{ color: '#1e293b' }}, ticks: {{ color: '#64748b',
+            callback: v => v.toLocaleString() }} }}
+    }}
+  }}
+}});
+</script>
+</body>
+</html>"""
+
+    with open(path, "w", encoding="utf-8") as fp:
+        fp.write(html)
+    print(f"\n  [HTML] 已保存至 {path}  →  用浏览器打开即可查看")
+
+
 def save_csv(flights: List[Flight], path: str = OUTPUT_CSV):
     with open(path, "w", newline="", encoding="utf-8") as fp:
         writer = csv.writer(fp)
@@ -641,12 +932,18 @@ def main():
         "--demo", action="store_true",
         help="使用内置 MXP 示例数据（无需网络/账号，用于演示呈现效果）"
     )
+    parser.add_argument(
+        "--html", action="store_true",
+        help="生成 HTML 报告（arrivals_mxp.html），可在浏览器打开"
+    )
     args = parser.parse_args()
 
     # Demo 模式
     if args.demo:
         flights = get_demo_flights()
         print_flights(flights)
+        if args.html:
+            save_html(flights)
         if not args.no_csv:
             save_csv(flights)
         if args.planner:
@@ -689,6 +986,9 @@ def main():
         return
 
     print_flights(flights)
+
+    if args.html:
+        save_html(flights)
 
     if not args.no_csv:
         save_csv(flights)
