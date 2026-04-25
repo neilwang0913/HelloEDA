@@ -45,6 +45,11 @@ OPENSKY_USER      = ""   # OpenSky 注册账号（免费）：https://opensky-ne
 OPENSKY_PASS      = ""   # OpenSky 密码
 AVIATIONSTACK_KEY = ""   # AviationStack API Key（免费注册）：https://aviationstack.com/
 
+# ── GitHub 数据源配置 ──
+GITHUB_REPO       = "neilwang0913/HelloEDA"   # GitHub 仓库
+GITHUB_DATA_FILE  = "flights_input.csv"        # 上传真实数据的文件名
+GITHUB_BRANCH     = "claude/add-claude-documentation-uTWAG"  # 分支
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -161,7 +166,121 @@ def fetch_opensky(date: datetime.date = None,
 
 
 # ─────────────────────────────────────────
-# 数据源 2：MXP 官网 HTML 解析（静态尝试）
+# 数据源 2：GitHub 仓库 CSV 文件读取
+# ─────────────────────────────────────────
+
+def load_local_csv(path: str) -> List[Flight]:
+    """读取本地 CSV 文件，格式同 flights_input.csv"""
+    import os
+    if not os.path.exists(path):
+        print(f"[本地CSV] 文件不存在：{path}")
+        return []
+    flights = []
+    print(f"[本地CSV] 读取 {path} ...")
+    try:
+        with open(path, encoding="utf-8") as fp:
+            lines = fp.readlines()
+        has_header = any(k in lines[0].lower() for k in ["callsign","flight","航班"]) if lines else False
+        for line in lines[1 if has_header else 0:]:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 4:
+                continue
+            try:
+                callsign = parts[0]
+                origin   = parts[1]
+                arr_hour = int(parts[2])
+                arr_min  = int(parts[3])
+                pax      = int(parts[4]) if len(parts) > 4 and parts[4] else AVG_PAX_INTL
+                status   = parts[5] if len(parts) > 5 else "landed"
+                flights.append(Flight(callsign, origin, arr_hour, arr_min, pax, status))
+            except (ValueError, IndexError):
+                continue
+        print(f"[本地CSV] 解析成功：{len(flights)} 条记录")
+        return sorted(flights, key=lambda f: f.arr_hour * 60 + f.arr_min)
+    except Exception as e:
+        print(f"[本地CSV] 读取失败：{e}")
+        return []
+
+
+def fetch_from_github() -> List[Flight]:
+    """
+    通过 GitHub API 读取仓库中的 flights_input.csv。
+    用户将真实航班数据上传到该文件后，此函数自动解析并返回。
+
+    CSV 格式（首行为标题）：
+      callsign, origin, arr_hour, arr_min, pax, status
+      LH1234,  FRA,    8,        10,       167,  landed
+
+    pax 和 status 列可省略，省略时使用默认值。
+    """
+    url = (f"https://api.github.com/repos/{GITHUB_REPO}"
+           f"/contents/{GITHUB_DATA_FILE}?ref={GITHUB_BRANCH}")
+
+    print(f"[GitHub] 读取 {GITHUB_REPO}/{GITHUB_DATA_FILE} ...")
+    try:
+        resp = requests.get(url, headers={
+            **HEADERS,
+            "Accept": "application/vnd.github.v3+json"
+        }, timeout=15)
+
+        if resp.status_code == 404:
+            print(f"[GitHub] 文件不存在：{GITHUB_DATA_FILE}")
+            print(f"  → 请将真实航班数据上传到仓库根目录，文件名：{GITHUB_DATA_FILE}")
+            print(f"  → 格式参考：flights_input_template.csv")
+            return []
+
+        resp.raise_for_status()
+        data = resp.json()
+
+        # GitHub API 返回 base64 编码内容
+        import base64
+        raw = base64.b64decode(data["content"]).decode("utf-8")
+
+        flights = []
+        lines = raw.strip().splitlines()
+        if not lines:
+            print("[GitHub] 文件为空。")
+            return []
+
+        # 检测是否有标题行
+        first = lines[0].lower()
+        has_header = any(k in first for k in ["callsign", "flight", "航班"])
+        start = 1 if has_header else 0
+
+        for line in lines[start:]:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 4:
+                continue
+            try:
+                callsign = parts[0]
+                origin   = parts[1]
+                arr_hour = int(parts[2])
+                arr_min  = int(parts[3])
+                pax      = int(parts[4]) if len(parts) > 4 and parts[4] else AVG_PAX_INTL
+                status   = parts[5] if len(parts) > 5 else "landed"
+                flights.append(Flight(callsign, origin, arr_hour, arr_min, pax, status))
+            except (ValueError, IndexError):
+                continue
+
+        print(f"[GitHub] 解析成功：{len(flights)} 条航班记录（来自真实数据）")
+        return sorted(flights, key=lambda f: f.arr_hour * 60 + f.arr_min)
+
+    except requests.exceptions.ConnectionError:
+        print("[GitHub] 网络连接失败。")
+        return []
+    except Exception as e:
+        print(f"[GitHub] 读取失败：{e}")
+        return []
+
+
+# ─────────────────────────────────────────
+# 数据源 3：MXP 官网 HTML 解析（静态尝试）
 # ─────────────────────────────────────────
 
 def fetch_mxp_website() -> List[Flight]:
@@ -1017,9 +1136,13 @@ def main():
     )
     parser.add_argument(
         "--source",
-        choices=["opensky", "aviationstack", "website", "selenium"],
-        default="opensky",
-        help="数据源（默认 opensky；需账号/Key 见脚本顶部配置）"
+        choices=["github", "opensky", "aviationstack", "website", "selenium"],
+        default="github",
+        help="数据源（默认 github：读取仓库中的 flights_input.csv）"
+    )
+    parser.add_argument(
+        "--input", type=str, default=None,
+        help="直接读取本地 CSV 文件（格式同 flights_input.csv），优先级最高"
     )
     parser.add_argument(
         "--date", type=str, default=None,
@@ -1047,6 +1170,22 @@ def main():
     )
     args = parser.parse_args()
 
+    # 本地文件模式（优先级最高）
+    if args.input:
+        flights = load_local_csv(args.input)
+        if flights:
+            print_flights(flights)
+            if args.html:  save_html(flights)
+            if args.md:    save_md(flights)
+            if not args.no_csv: save_csv(flights)
+            if args.planner:    print_planner_format(flights)
+            return
+        else:
+            print(f"[本地CSV] 读取失败，降级到 Demo 模式...")
+            flights = get_demo_flights()
+            print_flights(flights)
+            return
+
     # Demo 模式
     if args.demo:
         flights = get_demo_flights()
@@ -1067,7 +1206,13 @@ def main():
         query_date = datetime.date.fromisoformat(args.date)
 
     # 选择数据源（自动降级）
-    if args.source == "opensky":
+    if args.source == "github":
+        flights = fetch_from_github()
+        if not flights:
+            print("[主程序] GitHub 文件无数据，降级到 Demo...")
+            print("         提示：将真实数据上传到仓库中的 flights_input.csv 后重试")
+            flights = get_demo_flights()
+    elif args.source == "opensky":
         flights = fetch_opensky(date=query_date)
         if not flights:
             print("[主程序] OpenSky 无数据，降级到 AviationStack...")

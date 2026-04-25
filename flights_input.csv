@@ -1,0 +1,17 @@
+# MXP 机场到达航班数据文件
+# 用法：将此文件中的示例行替换为真实航班数据，提交到 GitHub 后运行：
+#   python3 mxp_flight_scraper.py --html --md
+#
+# 列说明：
+#   callsign  : 航班号（如 LH1234）
+#   origin    : 出发地 IATA 代码（如 FRA）
+#   arr_hour  : 到达小时（0-23，24小时制）
+#   arr_min   : 到达分钟（0-59）
+#   pax       : 旅客数（可不填，默认 180）
+#   status    : 状态（landed / scheduled / delayed，可不填）
+#
+# ── 请从第 15 行开始替换为真实数据 ──
+callsign,origin,arr_hour,arr_min,pax,status
+EXAMPLE1,FRA,6,30,167,landed
+EXAMPLE2,LHR,7,15,178,landed
+EXAMPLE3,CDG,8,0,202,landed
