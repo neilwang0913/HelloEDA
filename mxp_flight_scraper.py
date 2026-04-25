@@ -20,6 +20,8 @@ MXP 机场航班信息爬虫
   pip install requests beautifulsoup4
 """
 
+import os
+import math
 import time
 import csv
 import json
@@ -40,10 +42,10 @@ OPENSKY_URL       = "https://opensky-network.org/api/flights/arrival"
 AVIATIONSTACK_URL = "http://api.aviationstack.com/v1/flights"
 MXP_URL           = "https://www.milanomalpensa-airport.com/en/flights/arrivals"
 
-# ── 账号配置（填入后生效，留空则跳过该数据源）──
-OPENSKY_USER      = ""   # OpenSky 注册账号（免费）：https://opensky-network.org/
-OPENSKY_PASS      = ""   # OpenSky 密码
-AVIATIONSTACK_KEY = ""   # AviationStack API Key（免费注册）：https://aviationstack.com/
+# ── 账号配置：优先读取环境变量，其次使用下面的默认值（留空则跳过该数据源）──
+OPENSKY_USER      = os.environ.get("OPENSKY_USER", "")
+OPENSKY_PASS      = os.environ.get("OPENSKY_PASS", "")
+AVIATIONSTACK_KEY = os.environ.get("AVIATIONSTACK_KEY", "")
 
 # ── GitHub 数据源配置 ──
 GITHUB_REPO       = "neilwang0913/HelloEDA"   # GitHub 仓库
@@ -89,12 +91,104 @@ class Flight:
 # 数据源 1：OpenSky Network API
 # ─────────────────────────────────────────
 
+# LIMC (MXP) 机场坐标与进近边界框
+LIMC_LAT  = 45.6306
+LIMC_LON  = 8.7231
+LIMC_BBOX = {"lamin": 45.3, "lomin": 8.3, "lamax": 45.9, "lomax": 9.1}
+
+OPENSKY_STATES_URL = "https://opensky-network.org/api/states/all"
+
+def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Haversine 距离（公里）"""
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+    return R * 2 * math.asin(math.sqrt(a))
+
+
+def fetch_opensky_live(radius_km: float = 80.0) -> List[Flight]:
+    """
+    通过 OpenSky /states/all 获取当前在 LIMC 附近进近/降落的航班（实时，无需研究员权限）。
+    筛选条件：在机场 radius_km 范围内、高度 < 3000m、垂直速度 < 0（下降）。
+    返回的到达时刻取当前 UTC 时间（近似值）。
+    """
+    auth = (OPENSKY_USER, OPENSKY_PASS) if OPENSKY_USER else None
+    print(f"[OpenSky Live] 获取 LIMC 附近 {radius_km:.0f}km 内进近航班（实时）...")
+
+    try:
+        resp = requests.get(
+            OPENSKY_STATES_URL,
+            params=LIMC_BBOX,
+            auth=auth,
+            timeout=20,
+        )
+        if resp.status_code == 429:
+            print("[OpenSky Live] 触发频率限制，请稍后重试（匿名每10秒1次，登录每5秒1次）。")
+            return []
+        resp.raise_for_status()
+
+        data   = resp.json()
+        states = data.get("states") or []
+        now_utc = datetime.datetime.utcnow()
+
+        flights = []
+        for s in states:
+            # OpenSky states 字段索引：
+            # 0=icao24, 1=callsign, 2=origin_country, 3=time_position,
+            # 4=last_contact, 5=longitude, 6=latitude, 7=baro_altitude,
+            # 8=on_ground, 9=velocity, 10=true_track, 11=vertical_rate,
+            # 12=sensors, 13=geo_altitude, 14=squawk, 15=spi, 16=position_source
+            if len(s) < 12:
+                continue
+
+            callsign     = (s[1] or "").strip()
+            lon          = s[5]
+            lat          = s[6]
+            baro_alt     = s[7]    # 米，None 表示无数据
+            on_ground    = s[8]
+            vertical_rate = s[11]  # 米/秒，负数=下降
+
+            if not callsign or lon is None or lat is None:
+                continue
+
+            # 只保留下降中（vertical_rate < -1 m/s）或刚落地、高度 < 3000m 的飞机
+            alt_ok    = baro_alt is None or baro_alt < 3000
+            descend   = (vertical_rate is not None and vertical_rate < -1) or on_ground
+            dist_ok   = _distance_km(LIMC_LAT, LIMC_LON, lat, lon) <= radius_km
+
+            if not (alt_ok and descend and dist_ok):
+                continue
+
+            # 到达时刻用当前 UTC（进近中的航班约 5~20 分钟后落地，此处用快照时刻）
+            flights.append(Flight(
+                callsign=callsign,
+                origin="LIVE",
+                arr_hour=now_utc.hour,
+                arr_min=now_utc.minute,
+                pax=AVG_PAX_INTL,
+                status="approaching" if not on_ground else "landed",
+            ))
+
+        print(f"[OpenSky Live] 当前进近/落地航班：{len(flights)} 架")
+        return sorted(flights, key=lambda f: f.arr_hour * 60 + f.arr_min)
+
+    except requests.exceptions.ConnectionError:
+        print("[OpenSky Live] 网络连接失败。")
+        return []
+    except requests.exceptions.Timeout:
+        print("[OpenSky Live] 请求超时。")
+        return []
+    except Exception as e:
+        print(f"[OpenSky Live] 未知错误：{e}")
+        return []
+
+
 def fetch_opensky(date: datetime.date = None,
                   max_hours: int = 24) -> List[Flight]:
     """
-    从 OpenSky Network 获取 MXP 到达航班。
-    date: 查询日期，默认今天
-    max_hours: 查询时间窗口（小时），匿名用户最大7天前数据
+    从 OpenSky Network 获取 MXP 到达航班（历史接口，需研究员账号）。
+    若返回 403，自动降级到 fetch_opensky_live()。
     """
     if date is None:
         date = datetime.date.today()
@@ -103,14 +197,12 @@ def fetch_opensky(date: datetime.date = None,
                                    0, 0, 0).timestamp())
     end   = begin + max_hours * 3600
 
-    print(f"[OpenSky] 查询 {AIRPORT_ICAO} 到达航班：{date} ...")
+    print(f"[OpenSky] 查询 {AIRPORT_ICAO} 到达航班（历史）：{date} ...")
 
     auth = (OPENSKY_USER, OPENSKY_PASS) if OPENSKY_USER else None
     if not auth:
-        print("[OpenSky] 未配置账号，/flights/arrival 接口需登录。")
-        print("  → 免费注册：https://opensky-network.org/")
-        print("  → 注册后在脚本顶部填写 OPENSKY_USER / OPENSKY_PASS")
-        return []
+        print("[OpenSky] 未配置账号，降级到实时接口...")
+        return fetch_opensky_live()
 
     try:
         resp = requests.get(
@@ -118,11 +210,11 @@ def fetch_opensky(date: datetime.date = None,
             params={"airport": AIRPORT_ICAO, "begin": begin, "end": end},
             headers=HEADERS,
             auth=auth,
-            timeout=20
+            timeout=20,
         )
         if resp.status_code == 403:
-            print("[OpenSky] 认证失败（账号或密码错误）。")
-            return []
+            print("[OpenSky] 历史接口需研究员账号（403），改用实时状态接口...")
+            return fetch_opensky_live()
         if resp.status_code == 429:
             print("[OpenSky] 触发频率限制，请稍后重试。")
             return []
@@ -138,17 +230,14 @@ def fetch_opensky(date: datetime.date = None,
             if not callsign:
                 continue
             origin = r.get("estDepartureAirport") or "UNK"
-
-            # lastSeen = 最后一次收到信号的时间（近似到达时刻）
             arr_ts = r.get("lastSeen") or r.get("firstSeen") or 0
             arr_dt = datetime.datetime.utcfromtimestamp(arr_ts)
-
             flights.append(Flight(
                 callsign=callsign,
                 origin=origin,
                 arr_hour=arr_dt.hour,
                 arr_min=arr_dt.minute,
-                pax=AVG_PAX_INTL
+                pax=AVG_PAX_INTL,
             ))
 
         print(f"[OpenSky] 获取到 {len(flights)} 条到达记录。")

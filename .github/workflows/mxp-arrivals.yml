@@ -1,0 +1,39 @@
+name: MXP Hourly Arrivals (Sunday)
+
+on:
+  schedule:
+    - cron: '0 23 * * 6'    # Sat 23:00 UTC = Sun 00:00 BST  (first slot)
+    - cron: '0 0-22 * * 0'  # Sun 00:00–22:00 UTC = 01:00–23:00 BST (23 slots)
+  workflow_dispatch:          # Manual trigger for testing
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write         # Allows push via built-in GITHUB_TOKEN (no PAT needed)
+
+    steps:
+      - name: Checkout data branch
+        uses: actions/checkout@v4
+        with:
+          ref: claude/add-claude-documentation-uTWAG
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests --quiet
+
+      - name: Fetch and append MXP arrivals
+        run: python fetch_and_append.py
+
+      - name: Commit and push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add arrivals_mxp.csv
+          git diff --staged --quiet \
+            && echo "No new flights this hour, skipping commit." \
+            || (git commit -m "data: MXP arrivals $(date -u '+%Y-%m-%d %H:%M UTC')" && git push)
