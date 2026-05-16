@@ -1,0 +1,38 @@
+name: Generate MXP Arrivals Report
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests --quiet
+
+      - name: Generate HTML and Markdown report
+        run: python3 mxp_flight_scraper.py --demo --html --md
+
+      - name: Commit and push reports
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add arrivals_mxp.html arrivals_mxp.md arrivals_mxp.csv
+          git diff --staged --quiet \
+            && echo "No changes to commit." \
+            || (git commit -m "report: auto-generate MXP arrivals $(date -u '+%Y-%m-%d %H:%M UTC')" && git push)
